@@ -82,20 +82,27 @@ def _estimate(
     resolved: dict,
     strength: float | None = None,
     size: tuple[int, int] | None = None,
+    precise_ref_count: int | None = None,
 ) -> str:
-    """Anlas 估价文本；订阅查询失败时附带原因。"""
+    """Anlas 估价文本；订阅查询失败时附带原因。
+
+    precise_ref_count 显式传入时直接采用（生成/增强摘要按基础模型定好数）；
+    未传时按 resolved 自带 refs 与模型支持位推导（read_workflow 路径）。
+    """
     img = resolved.get("image")
     size = size or (resolved["width"], resolved["height"])
     strength = estimate_image_payload(resolved, strength)
     model = resolved.get("model")
     # 仅受支持的模型才会把参考送进请求；其余模型生成时直接报错不计费
-    precise_ref_count = (
-        len(refs)
-        if (refs := resolved.get("precise_refs") or [])
-        and model
-        and nai_request.MODELS[model].supports_precise_reference
-        else 0
-    )
+    model_profile = nai_request.MODELS.get(model) if model else None
+    if precise_ref_count is None:
+        precise_ref_count = (
+            len(refs)
+            if (refs := resolved.get("precise_refs") or [])
+            and model_profile
+            and model_profile.supports_precise_reference
+            else 0
+        )
     is_opus, usage = nai_request.fetch_subscription()
     text = anlas.estimate_generation_cost(
         width=size[0],
@@ -624,6 +631,9 @@ def _dispatch_generation(
             "mask": mask_info if mask_info else None,
             "characters": len(resolved["characters"]),
             "use_coords": resolved["use_coords"],
+            "precise_ref_count": len(resolved.get("precise_refs") or [])
+            if nai_request.MODELS[resolved["model"]].supports_precise_reference
+            else 0,
         }
     )
 
@@ -652,7 +662,8 @@ def generate_image(name: str) -> list:
                      "steps": params["steps"], "n_samples": params["n_samples"],
                      "model": params["model"],
                      "image": None if params["strength"] is None
-                             else {"strength": params["strength"]}})
+                             else {"strength": params["strength"]}},
+                    precise_ref_count=params["precise_ref_count"])
         + "；已保存:\n"
         + "\n".join(str(p) for p in _save_images(images, None))
     )
@@ -709,6 +720,7 @@ def enhance_image(name: str, level: int = 3, factor: float = 2.0) -> list:
         + _estimate({"width": width, "height": height,
                      "steps": resolved["steps"], "n_samples": 1,
                      "model": resolved["model"],
+                     "precise_refs": resolved.get("precise_refs") or [],
                      "image": {"strength": strengths[level - 1]}})
         + "；已保存:\n"
         + "\n".join(str(p) for p in _save_images(images, None))

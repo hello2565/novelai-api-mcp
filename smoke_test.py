@@ -270,6 +270,7 @@ def main() -> None:
     assert "已新增精准参考" in out, out
     out = call(39, "read_workflow", {"name": "w_ref"})
     assert '"precise_refs"' in out and '"type": "character"' in out, out
+    assert "精准参考 1 张：每样本 +5" in out, out  # 估价计入精参加费
     out = call(40, "generate_image", {"name": "w_ref"})
     assert "NAI_TOKEN" in out, out  # 请求构建通过，网络前才失败
     out = call(41, "set_precise_reference", {"name": "w_ref", "image_path": str(ref_png), "type": "wrong"})
@@ -300,6 +301,19 @@ def main() -> None:
     norm = precise_ref.normalize(make_png(4, 8))  # aspect 0.5 → 竖档
     nw, nh, _ = decode_png_rgb(norm)
     assert (nw, nh) == (1024, 1536), (nw, nh)
+
+    # 精参费用：512²@28步免费档，2样本 1 免费图像 + 每样本 3×5 参考费 = 35
+    out = anlas.estimate_generation_cost(
+        width=512, height=512, steps=28, n_samples=2, is_opus=True,
+        model="nai-diffusion-4-5-full", precise_ref_count=3,
+    )
+    assert "预计 Anlas：35" in out, out
+    assert "Opus 免费档" in out and "精准参考 3 张：每样本 +15" in out, out
+    out = anlas.estimate_generation_cost(
+        width=512, height=512, steps=28, n_samples=2, is_opus=True,
+        model="nai-diffusion-4-5-full",
+    )
+    assert "预计 Anlas：5" in out, out
 
     proc.kill()
     print("smoke test passed")

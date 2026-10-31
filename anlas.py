@@ -7,6 +7,9 @@ _ANLAS_AREA = 2.951823174884865e-6
 _ANLAS_STEP_AREA = 5.753298233447344e-7
 _MAX_PER_SAMPLE = 140
 _OPUS_FREE_PIXELS = 1024 * 1024
+# 官方 Character Reference（精准参考）单价：每张参考每样本 5 Anlas
+# （Launcher AnlasCalculator._preciseReferenceCost），不参与任何免档抵扣
+_PRECISE_REF_COST = 5
 
 # 云端超分输入面积计费分档；Opus 输入 ≤ 640×640 免费
 _UPSCALE_FREE_INPUT = 640 * 640
@@ -27,11 +30,14 @@ def estimate_generation_cost(
     strength: float = 1.0,
     is_opus: bool | None = None,
     model: str | None = None,
+    precise_ref_count: int = 0,
 ) -> str:
     """估算一次 generate-image 请求的 Anlas 消耗，返回面向用户的文本。
 
     Launcher AnlasCalculator 现代公式：面积/步数部分先取整，再乘模型倍率
     （V5 = 1.5），最后按重绘强度取整。V5 的 Opus 免费额度受官方配额池限制。
+    每张精准参考按官方口径加收 `_PRECISE_REF_COST`（5）Anlas/样本，
+    该费用不在 Opus 免费档抵扣范围内（含免费首张）。
     """
     pixels = width * height
     multiplier = 1.5 if model and model.startswith("nai-diffusion-5") else 1.0
@@ -44,6 +50,7 @@ def estimate_generation_cost(
         if is_opus is True and multiplier > 1.0
         else ""
     )
+    ref_fee = _PRECISE_REF_COST * max(precise_ref_count, 0)
     if per_sample > _MAX_PER_SAMPLE:
         return (
             f"预计每张 ≥{_MAX_PER_SAMPLE} Anlas：超出单张可估上限，"
@@ -55,7 +62,11 @@ def estimate_generation_cost(
         and steps <= 28
         and pixels <= _OPUS_FREE_PIXELS
     )
-    total = cost * max(n_samples - (1 if free else 0), 0)
+    # Opus 免费档只免首张图像样本费，参考图附加费每张样本照收
+    total = (
+        cost * max(n_samples - (1 if free else 0), 0)
+        + ref_fee * n_samples
+    )
     note = (
         "Opus 免费档"
         if free
@@ -63,7 +74,12 @@ def estimate_generation_cost(
         if is_opus is None
         else "非 Opus"
     )
-    return f"预计 Anlas：{total}（{note}{quota_note}；服务端计费为准）"
+    ref_note = (
+        f"；精准参考 {precise_ref_count} 张：每样本 +{ref_fee}"
+        if precise_ref_count
+        else ""
+    )
+    return f"预计 Anlas：{total}（{note}{quota_note}{ref_note}；服务端计费为准)"
 
 
 def estimate_upscale_cost(input_pixels: int, is_opus: bool | None = None) -> str:

@@ -88,6 +88,14 @@ def _estimate(
     size = size or (resolved["width"], resolved["height"])
     strength = estimate_image_payload(resolved, strength)
     model = resolved.get("model")
+    # 仅受支持的模型才会把参考送进请求；其余模型生成时直接报错不计费
+    precise_ref_count = (
+        len(refs)
+        if (refs := resolved.get("precise_refs") or [])
+        and model
+        and nai_request.MODELS[model].supports_precise_reference
+        else 0
+    )
     is_opus, usage = nai_request.fetch_subscription()
     text = anlas.estimate_generation_cost(
         width=size[0],
@@ -97,6 +105,7 @@ def _estimate(
         strength=strength,
         is_opus=is_opus,
         model=model,
+        precise_ref_count=precise_ref_count,
     )
     reason = nai_request.subscription_failure()
     if reason and "订阅查询失败" in text:
@@ -731,8 +740,9 @@ def _enhance_dispatch(resolved: dict) -> tuple[list[bytes], dict]:
         noise_schedule=resolved["noise_schedule"],
         source_image_b64=base64.b64encode(image_bytes).decode(),
         strength=resolved["image"]["strength"],
-        noise=resolved["image"]["noise"],
+        noise=resolved["image"].get("noise", nai_request.DEFAULT_NOISE),
         enhance_addition=True,
+        precise_refs=resolved.get("precise_refs") or None,
     )
     zip_bytes = nai_request.generate_image(request)
     images = nai_request.pngs_from_response(zip_bytes)

@@ -93,6 +93,12 @@ INPAINTING_MODELS = {
 }
 DEFAULT_INPAINT_STRENGTH = 1.0  # Launcher ImageParams.inpaintStrength 默认
 
+# 精准参考（Launcher PreciseRefType；API 字符串 character&style）
+PRECISE_REF_TYPES = ("character", "style", "character&style")
+DEFAULT_PRECISE_REF_TYPE = "character&style"
+DEFAULT_PRECISE_REF_STRENGTH = 1.0
+DEFAULT_PRECISE_REF_FIDELITY = 1.0
+
 
 @dataclass
 class ModelProfile:
@@ -107,6 +113,8 @@ class ModelProfile:
     # Anlas 模型倍率（V5 为 1.5）与是否发送 cfg_rescale（V5 Medium 不支持）
     anlas_multiplier: float = 1.0
     supports_cfg_rescale: bool = True
+    # 精准参考（Character Reference / director_reference*）仅 V4.5 两档支持
+    supports_precise_reference: bool = False
 
 
 _V4_UC = {
@@ -172,6 +180,7 @@ MODELS: dict[str, ModelProfile] = {
         scale=5.0,
         steps=23,
         max_characters=MAX_CHARACTERS,
+        supports_precise_reference=True,
     ),
     "nai-diffusion-4-5-curated": ModelProfile(
         quality="location, masterpiece, no text, -0.8::feet::, rating:general",
@@ -202,6 +211,7 @@ MODELS: dict[str, ModelProfile] = {
         scale=5.0,
         steps=23,
         max_characters=MAX_CHARACTERS,
+        supports_precise_reference=True,
     ),
     "nai-diffusion-4-full": ModelProfile(
         quality="no text, best quality, very aesthetic, absurdres",
@@ -382,6 +392,7 @@ def build_request(
     enhance_addition: bool = False,
     mask_b64: str | None = None,
     inpaint_strength: float | None = None,
+    precise_refs: list | None = None,
 ) -> dict:
     """构造 generate-image 请求体（含 V4 角色结构、img2img 与 infill 字段）。"""
     profile = MODELS[model]
@@ -512,6 +523,36 @@ def build_request(
         params["color_correct"] = False
         # 官网对带底图的请求固定 extra_noise_seed = seed - 1
         params["extra_noise_seed"] = seed - 1
+
+    if precise_refs:
+        # Launcher buildPreciseReferenceParameters：请求体统一 base64 PNG，
+        # 强度侧 secondary = 1.0 - fidelity
+        if not profile.supports_precise_reference:
+            raise ValueError(
+                f"模型 {model} 不支持 precise reference（官网当前仅 "
+                "V4.5 Curated / V4.5 Full 支持）"
+            )
+        images = []
+        descriptions = []
+        strengths = []
+        secondaries = []
+        for ref in precise_refs:
+            image_bytes = open(ref["path"], "rb").read()
+            if image_bytes[:8] != b"\x89PNG\r\n\x1a\n":
+                raise ValueError(f"precise reference 图片需为 PNG：{ref['path']}")
+            images.append(base64.b64encode(image_bytes).decode())
+            descriptions.append(
+                {"caption": {"base_caption": ref["type"], "char_captions": []},
+                 "legacy_uc": False}
+            )
+            strengths.append(float(ref["strength"]))
+            secondaries.append(float(1.0 - ref["fidelity"]))
+        params["normalize_reference_strength_multiple"] = True
+        params["director_reference_images"] = images
+        params["director_reference_descriptions"] = descriptions
+        params["director_reference_information_extracted"] = [1] * len(images)
+        params["director_reference_strength_values"] = strengths
+        params["director_reference_secondary_strength_values"] = secondaries
 
     action = "generate"
     if mask_b64:

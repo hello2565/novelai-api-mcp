@@ -44,6 +44,7 @@ GEN_KEYS = (
     "cfg_rescale",
     "noise_schedule",
     "use_coords",
+    "precise_refs",
 )
 
 
@@ -161,6 +162,30 @@ def resolve_generation(wf: dict) -> dict:
     seed = int(gen.get("seed", -1))
     use_coords = bool(gen.get("use_coords"))
 
+    # 精准参考（V4.5 特有；解析类型/强度与保真度，路径延后到出图时读取）
+    precise_refs = []
+    for index, ref in enumerate(gen.get("precise_refs") or []):
+        if not isinstance(ref, dict) or not str(ref.get("path") or "").strip():
+            raise ValueError(f"precise_refs[{index}] 缺少 path")
+        ref_type = ref.get("type") or nai_request.DEFAULT_PRECISE_REF_TYPE
+        if ref_type not in nai_request.PRECISE_REF_TYPES:
+            raise ValueError(
+                f"precise_refs[{index}].type 无效 {ref_type}，可选："
+                f"{', '.join(nai_request.PRECISE_REF_TYPES)}"
+            )
+        precise_refs.append(
+            {
+                "path": os.path.expanduser(str(ref["path"])),
+                "type": ref_type,
+                "strength": float(
+                    ref.get("strength", nai_request.DEFAULT_PRECISE_REF_STRENGTH)
+                ),
+                "fidelity": float(
+                    ref.get("fidelity", nai_request.DEFAULT_PRECISE_REF_FIDELITY)
+                ),
+            }
+        )
+
     characters = wf.get("characters") or []
     if characters and not nai_request.is_v4_model(model):
         raise ValueError(f"模型 {model} 不支持角色 Prompt，请换 V4 及以上模型")
@@ -247,6 +272,7 @@ def resolve_generation(wf: dict) -> dict:
         "cfg_rescale": cfg_rescale,
         "noise_schedule": schedule,
         "use_coords": use_coords,
+        "precise_refs": precise_refs,
         "characters": characters,
         "image": image_info,
         "mask": mask_info,

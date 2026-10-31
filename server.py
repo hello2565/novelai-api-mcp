@@ -309,6 +309,56 @@ def set_mask(
     )
 
 
+@mcp.tool(
+    description=(
+        "精准参考（Precise Reference / Character Reference）：以参考图锁定"
+        "角色形象或画风。仅 V4.5 Curated / V4.5 Full 支持（当前 V5 系不带"
+        "该能力，生成时明确报错）；图片须为本地 PNG。多次调用追加多张；"
+        "image_path='clear' 清空全部。类型 character=仅角色 / style=仅画风"
+        " / character&style=两者（默认）；strength 默认 1.0（官方强度，"
+        "透传 director_reference_strength_values）；fidelity 默认 1.0"
+        "（保真度，透传为 1-fidelity 的 secondary 强度）。"
+    )
+)
+def set_precise_reference(
+    name: str,
+    image_path: str,
+    type: str = "character&style",
+    strength: float = 1.0,
+    fidelity: float = 1.0,
+) -> str:
+    """追加或清空工作流 gen.precise_refs。"""
+    wf = workflow.load(name)
+    gen = dict(wf.get("gen") or {})
+    path = image_path.strip() if isinstance(image_path, str) else ""
+    refs = list(gen.get("precise_refs") or [])
+    if path in ("", "clear"):
+        gen["precise_refs"] = []
+        workflow.write_patch(name, {"gen": gen})
+        return f"工作流 {name} 已清空全部精准参考（原 {len(refs)} 张）。"
+    if type not in nai_request.PRECISE_REF_TYPES:
+        raise ValueError(
+            f"type 无效 {type}，可选：{', '.join(nai_request.PRECISE_REF_TYPES)}"
+        )
+    import os
+
+    expanded = os.path.expanduser(path)
+    with open(expanded, "rb") as fh:
+        is_png = fh.read(8) == b"\x89PNG\r\n\x1a\n"
+    if not is_png:
+        raise ValueError(f"精准参考图片需为 PNG：{path}")
+    refs.append(
+        {"path": expanded, "type": type, "strength": strength, "fidelity": fidelity}
+    )
+    gen["precise_refs"] = refs
+    workflow.write_patch(name, {"gen": gen})
+    return (
+        f"工作流 {name} 已新增精准参考 {expanded}（type={type}，"
+        f"strength={strength}，fidelity={fidelity}；当前共 {len(refs)} 张，"
+        "生成时以 director_reference* 字段发送）。"
+    )
+
+
 # ---------------------------------------------------------------------------
 # read / estimate（必须提供工作流名称，不生成）
 # ---------------------------------------------------------------------------
@@ -354,6 +404,7 @@ def list_gen_options() -> dict:
             "max_characters": profile.max_characters or None,
             "anlas_multiplier": profile.anlas_multiplier,
             "supports_cfg_rescale": profile.supports_cfg_rescale,
+            "supports_precise_reference": profile.supports_precise_reference,
             "inpainting_variant": nai_request.INPAINTING_MODELS.get(name),
         }
     return {
@@ -525,6 +576,7 @@ def _dispatch_generation(
             base64.b64encode(mask_bytes).decode() if mask_bytes else None
         ),
         inpaint_strength=mask_info["strength"] if mask_info else None,
+        precise_refs=resolved.get("precise_refs") or None,
     )
     action = (
         "infill" if mask_bytes

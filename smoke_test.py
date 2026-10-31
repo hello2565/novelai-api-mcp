@@ -107,10 +107,11 @@ def main() -> None:
 
     expected = {
         "set_prompt", "set_gen_param", "set_characters", "set_image",
-        "set_mask", "create_workflow", "delete_workflow",
-        "delete_all_workflows", "clear_saved_images", "read_workflow",
-        "estimate_anlas", "list_workflows", "list_gen_options",
-        "generate_image", "enhance_image", "upscale_image", "search_tag",
+        "set_mask", "set_precise_reference", "create_workflow",
+        "delete_workflow", "delete_all_workflows", "clear_saved_images",
+        "read_workflow", "estimate_anlas", "list_workflows",
+        "list_gen_options", "generate_image", "enhance_image",
+        "upscale_image", "search_tag",
     }
     resp = send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
     names = [t["name"] for t in resp["result"]["tools"]]
@@ -257,6 +258,36 @@ def main() -> None:
     assert ("w1" in out and "w_model" in out) and "已删除" in out, out
     out = call(35, "list_workflows", {})
     assert "w1" not in out, out
+
+    # 精准参考（V4.5 支持路径 / 非法类型 / 非 PNG / V5 明确报错 / 清空）
+    out = call(36, "create_workflow", {"name": "w_ref", "model": "nai-diffusion-4-5-full"})
+    assert "已创建" in out, out
+    out = call(37, "set_prompt", {"name": "w_ref", "prompt": "1girl"})
+    assert "w_ref" in out, out
+    ref_png = TMP / "ref.png"
+    ref_png.write_bytes(make_png())
+    out = call(38, "set_precise_reference", {"name": "w_ref", "image_path": str(ref_png), "type": "character"})
+    assert "已新增精准参考" in out, out
+    out = call(39, "read_workflow", {"name": "w_ref"})
+    assert '"precise_refs"' in out and '"type": "character"' in out, out
+    out = call(40, "generate_image", {"name": "w_ref"})
+    assert "NAI_TOKEN" in out, out  # 请求构建通过，网络前才失败
+    out = call(41, "set_precise_reference", {"name": "w_ref", "image_path": str(ref_png), "type": "wrong"})
+    assert "type 无效" in out, out
+    bad_png = TMP / "ref.bad"
+    bad_png.write_bytes(b"JPEG")
+    out = call(42, "set_precise_reference", {"name": "w_ref", "image_path": str(bad_png)})
+    assert "需为 PNG" in out, out
+    out = call(43, "set_precise_reference", {"name": "w_ref", "image_path": "clear"})
+    assert "已清空" in out, out
+    out = call(44, "create_workflow", {"name": "w_ref5", "model": "nai-diffusion-5-full"})
+    assert "已创建" in out, out
+    out = call(45, "set_prompt", {"name": "w_ref5", "prompt": "1girl"})
+    assert "w_ref5" in out, out
+    out = call(46, "set_precise_reference", {"name": "w_ref5", "image_path": str(ref_png)})
+    assert "已新增精准参考" in out, out
+    out = call(47, "generate_image", {"name": "w_ref5"})
+    assert "precise reference" in out, out  # V5 生成前明确报错
 
     proc.kill()
     print("smoke test passed")

@@ -86,6 +86,26 @@ def list_names() -> list[str]:
     return sorted(p.stem for p in WORKFLOW_DIR.glob("*.json"))
 
 
+def delete(name: str) -> bool:
+    """删除工作流文件；返回是否存在过。"""
+    path = workflow_path(name)
+    if not path.exists():
+        return False
+    path.unlink()
+    return True
+
+
+def delete_all() -> list[str]:
+    """删除目录下全部工作流，返回被删除的名称列表。"""
+    if not WORKFLOW_DIR.exists():
+        return []
+    removed = []
+    for path in sorted(WORKFLOW_DIR.glob("*.json")):
+        path.unlink()
+        removed.append(path.stem)
+    return removed
+
+
 # ---------------------------------------------------------------------------
 # 出图前解析：校验 + 按模型预设补默认值
 # ---------------------------------------------------------------------------

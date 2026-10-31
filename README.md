@@ -36,6 +36,9 @@ python -m venv .venv
 | --- | --- | --- |
 | `list_workflows()` | 列出全部工作流名 | 否 |
 | `create_workflow(name, model?)` | 创建空工作流；`model` 预填模型并写入其采样预设，重复创建报错 | 否 |
+| `delete_workflow(name)` | 删除单个工作流（永久删除）。**仅当用户明确指明删除该工作流时才调用** | 否 |
+| `delete_all_workflows()` | 删除全部工作流（永久删除）。**仅当用户明确要求清空工作流时才调用** | 否 |
+| `clear_saved_images()` | 清空已保存图片目录下全部 PNG（默认 `nai_mcp/images/`，env `NAI_OUTPUT_DIR` 可改）。**仅当用户明确要求清空图片时才调用** | 否 |
 | `set_prompt(name, prompt, uc?)` | 写正面提示词（`uc` 可选负面词） | 否 |
 | `set_gen_param(name, ...)` | 写生成参数（模型/尺寸/步数/引导/采样器/种子/数量/uc 预设/cfg_rescale/噪声调度/use_coords），部分更新 | 否 |
 | `set_characters(name, characters)` | V4+ 多角色提示词，每角色可带 `uc` 与位置 `center:[x,y]`（0-1，省略用官方默认布局）；`[]` 清空 | 否 |
@@ -121,7 +124,7 @@ $env:NAI_EMBEDDING_API_KEY = "..."   # 可选
 
 ## 验证
 
-`.venv/Scripts/python smoke_test.py` — 全离线：stdio 握手、14 个工具、工作流创建/读写、Anlas 估价与 V5 配额格式化、角色/底图/蒙版设置、tag 检索、错误路径（不触网、不扣费）。
+`.venv/Scripts/python smoke_test.py` — 全离线：stdio 握手、17 个工具、工作流创建/读写/删除、Anlas 估价与 V5 配额格式化、角色/底图/蒙版设置、tag 检索、错误路径（不触网、不扣费）。
 
 ## 参考实现：Aaalice_NAI_Launcher
 

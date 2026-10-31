@@ -34,10 +34,10 @@ mcp = FastMCP(
 )
 
 
-def _save_images(images: list[bytes], save_dir: str | None) -> list:
+def _output_dir(save_dir: str | None):
+    """图片保存目录：save_dir 参数优先，其次 env NAI_OUTPUT_DIR，默认项目 images/。"""
     from pathlib import Path
 
-    # 默认落在 nai_mcp 项目的 images/ 目录（NAI_OUTPUT_DIR 环境变量可覆盖）
     out_dir = (
         Path(save_dir).expanduser()
         if save_dir
@@ -46,6 +46,13 @@ def _save_images(images: list[bytes], save_dir: str | None) -> list:
             str(Path(__file__).resolve().parent / "images"),
         ))
     )
+    return out_dir
+
+
+def _save_images(images: list[bytes], save_dir: str | None) -> list:
+    from pathlib import Path
+
+    out_dir = _output_dir(save_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")
     paths = []
@@ -399,6 +406,59 @@ def create_workflow(name: str, model: str | None = None) -> str:
         "下一步：set_prompt 写提示词，之后 read_workflow/estimate_anlas 确认、"
         "generate_image 出图。"
     )
+
+
+@mcp.tool(
+    description=(
+        "删除一个命名工作流（永久删除，不可恢复）。"
+        "仅当用户明确指明要删除该工作流时才可调用。"
+    )
+)
+def delete_workflow(name: str) -> str:
+    """删除单个工作流文件。"""
+    if not workflow.delete(name):
+        raise ValueError(f"工作流不存在：{name}")
+    return f"已删除工作流 {name}"
+
+
+@mcp.tool(
+    description=(
+        "删除全部工作流（永久删除，不可恢复）。"
+        "仅当用户明确要求清空所有工作流时才可调用。"
+    )
+)
+def delete_all_workflows() -> str:
+    """删除工作流目录下全部 .json 工作流。"""
+    removed = workflow.delete_all()
+    if not removed:
+        return "当前没有任何工作流，无需删除。"
+    return f"已删除 {len(removed)} 个工作流：" + "、".join(removed)
+
+
+@mcp.tool(
+    description=(
+        "清空已保存图片目录（默认 nai_mcp/images/，env NAI_OUTPUT_DIR 可改；"
+        "只删该目录下的 *.png）。仅当用户明确要求清空图片时才可调用。"
+    )
+)
+def clear_saved_images() -> str:
+    """删除保存目录下的全部 PNG。"""
+    out_dir = _output_dir(None)
+    if not out_dir.is_dir():
+        return f"目录 {out_dir} 不存在，无需清理。"
+    removed = 0
+    size = 0
+    for path in out_dir.glob("*.png"):
+        size += path.stat().st_size
+        path.unlink()
+        removed += 1
+    if not removed:
+        return f"目录 {out_dir} 没有 PNG，无需清理。"
+    return (
+        f"已清空 {removed} 个 PNG（{size / 1048576:.1f} MB），"
+        f"目录：{out_dir}"
+    )
+
 
 
 # ---------------------------------------------------------------------------

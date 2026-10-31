@@ -18,6 +18,7 @@ TMP = ROOT / "tool" / ".tmp_smoke"
 ENV = dict(os.environ)
 ENV["NAI_MCP_WORKFLOW_DIR"] = str(TMP / "workflows")
 ENV["NAI_TAG_DB"] = str(TMP / "tags.db")
+ENV["NAI_OUTPUT_DIR"] = str(TMP / "images")
 ENV.pop("NAI_TOKEN", None)
 
 
@@ -106,9 +107,10 @@ def main() -> None:
 
     expected = {
         "set_prompt", "set_gen_param", "set_characters", "set_image",
-        "set_mask", "create_workflow", "read_workflow", "estimate_anlas",
-        "list_workflows", "list_gen_options", "generate_image",
-        "enhance_image", "upscale_image", "search_tag",
+        "set_mask", "create_workflow", "delete_workflow",
+        "delete_all_workflows", "clear_saved_images", "read_workflow",
+        "estimate_anlas", "list_workflows", "list_gen_options",
+        "generate_image", "enhance_image", "upscale_image", "search_tag",
     }
     resp = send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
     names = [t["name"] for t in resp["result"]["tools"]]
@@ -116,14 +118,21 @@ def main() -> None:
     assert set(names) == expected, names
 
     def call(cid, tool, args):
-        return send(
+        result = send(
             {
                 "jsonrpc": "2.0",
                 "id": cid,
                 "method": "tools/call",
                 "params": {"name": tool, "arguments": args},
             }
-        )["result"]["content"][0]["text"]
+        )["result"]
+        content = result.get("content") or []
+        if content:
+            return content[0]["text"]
+        # 数组返回值（如 list_workflows）无 text content，走结构化字段
+        return json.dumps(
+            result.get("structuredContent", result), ensure_ascii=False, indent=2
+        )
 
     # generate 缺工作流
     out = call(3, "generate_image", {"name": "nope"})
@@ -228,6 +237,26 @@ def main() -> None:
     # 透支：percent 与张数不再展示
     out = anlas.v5_usage_view(v5, {"percent": -0.5, "isNegative": True}, is_opus=True, area=area_1mp)
     assert "透支" in out and "%" not in out, out
+
+    # 工作流删除 / 全部删除 / 清空已存图片（均离线）
+    out = call(29, "delete_workflow", {"name": "w_ghost"})
+    assert "不存在" in out, out
+    out = call(30, "delete_workflow", {"name": "w_v5"})
+    assert "已删除工作流 w_v5" in out, out
+    out = call(31, "list_workflows", {})
+    assert "w_v5" not in out and "w1" in out, out
+    (TMP / "images").mkdir(exist_ok=True)
+    (TMP / "images" / "nai_test.png").write_bytes(b"PNG")
+    (TMP / "images" / "notes.txt").write_text("keep")
+    out = call(32, "clear_saved_images", {})
+    assert "已清空 1 个 PNG" in out, out
+    assert (TMP / "images" / "notes.txt").exists()  # 非 PNG 不动
+    out = call(33, "clear_saved_images", {})
+    assert "没有 PNG" in out, out
+    out = call(34, "delete_all_workflows", {})
+    assert ("w1" in out and "w_model" in out) and "已删除" in out, out
+    out = call(35, "list_workflows", {})
+    assert "w1" not in out, out
 
     proc.kill()
     print("smoke test passed")

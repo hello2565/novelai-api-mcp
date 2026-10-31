@@ -668,8 +668,10 @@ def upscale_image(image_path: str) -> list:
 @mcp.tool(
     description=(
         "检索标准 booru tag（供提示词用），支持中文/别名/tag 词面匹配；"
-        "例如输入“面向观众”可返回 looking at viewer。词库由 "
+        "例如输入"面向观众"可返回 looking at viewer。词库由 "
         "tool/build_tag_vector_db.py 从 Launcher tag_catalog.db 生成。"
+        "严格单 tag 检索：query 只能是一个 tag（一个概念/词组），"
+        "不支持多 tag 组合或整句搜索——想打多个词请逐个调用。"
         "use_vector 默认 False（仅词面，约 0.1s）；改 True 时走 embeddings "
         "语义检索（需已配置 NAI_EMBEDDING_URL 并填充向量，全新查询约 1-4s）——"
         "词面查不到或中文描述比较绕时再用。"

@@ -289,6 +289,18 @@ def main() -> None:
     out = call(47, "generate_image", {"name": "w_ref5"})
     assert "precise reference" in out, out  # V5 生成前明确报错
 
+    # 精准参考图规范化：官方只认三档黑底画布几何（否则 HTTP 500）
+    from nai_mask import decode_png_rgb, write_png
+
+    import precise_ref
+
+    norm = precise_ref.normalize(make_png(8, 4))  # aspect 2.0 → 横档
+    nw, nh, _ = decode_png_rgb(norm)
+    assert (nw, nh) == (1536, 1024), (nw, nh)
+    norm = precise_ref.normalize(make_png(4, 8))  # aspect 0.5 → 竖档
+    nw, nh, _ = decode_png_rgb(norm)
+    assert (nw, nh) == (1024, 1536), (nw, nh)
+
     proc.kill()
     print("smoke test passed")
 

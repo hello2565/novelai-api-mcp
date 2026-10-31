@@ -540,7 +540,12 @@ def build_request(
             image_bytes = open(ref["path"], "rb").read()
             if image_bytes[:8] != b"\x89PNG\r\n\x1a\n":
                 raise ValueError(f"precise reference 图片需为 PNG：{ref['path']}")
-            images.append(base64.b64encode(image_bytes).decode())
+            # 官网只认规格化几何（三档黑底画布），原始尺寸 PNG 会 HTTP 500
+            import precise_ref
+
+            images.append(
+                base64.b64encode(precise_ref.normalize(image_bytes)).decode()
+            )
             descriptions.append(
                 {"caption": {"base_caption": ref["type"], "char_captions": []},
                  "legacy_uc": False}

@@ -62,7 +62,7 @@ python -m venv .venv
 - 预设（来自 Launcher `ModelCapabilities`）：步数 28（V5 Medium 固定 14）；引导系数 V5 4.0 / V4.5 5.0 / V4 5.5 / V3 5.0；采样器 `k_euler_ancestral`；噪声调度 karras；UC 预设 heavy；img2img strength 0.7 / noise 0.0
 - V5 特有：UC `light` 为 V5 专属文案；`nai-diffusion-5-full-medium` 不发送 `cfg_rescale`；Anlas 模型倍率 1.5，且 Opus 免费额度改为**官方配额池**（见下文计费节；估价文本自动提示）
 - 官方质量词与 UC 预设文本自动补全；DDIM 仅 V3（V4+ 按官网规则回退 Euler Ancestral）
-- 精准参考（请求以 `director_reference*` 字段发送）：仅 V4.5 Curated / V4.5 Full 支持（同 Launcher `supportsPreciseReference`）；类型 `character` / `style` / `character&style`（默认）；`strength` 默认 1.0 透传强度，`fidelity` 默认 1.0 以 `1.0 - fidelity` 作为 secondary 强度；固定 `normalize_reference_strength_multiple=true`
+- 精准参考（请求以 `director_reference*` 字段发送）：仅 V4.5 Curated / V4.5 Full 支持（同 Launcher `supportsPreciseReference`）；类型 `character` / `style` / `character&style`（默认）；`strength` 默认 1.0 透传强度，`fidelity` 默认 1.0 以 `1.0 - fidelity` 作为 secondary 强度；固定 `normalize_reference_strength_multiple=true`。参考图在请求时自动按官网口径规范化：按最接近宽高比选 `1024×1536` / `1536×1024` / `1472×1472` 目标、等比缩放（bilinear）后居中贴黑底画布——发送原始尺寸会被服务端 HTTP 500（对齐 Launcher `ensurePngFormat`，插值算法有差异）
 - UC 约定：预设（heavy/light/humanFocus/none）已自带整套官方质量负面词（lowres、worst quality 等）。自定义 `uc` 只需写想规避的**特定**缺陷/构图目标词，别重复质量词以免权重被放大
 
 ### Inpaint（局部重绘）

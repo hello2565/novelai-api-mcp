@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+# smoke 测试与构建工具缓存（ffdkj 下载、tag_catalog 缓存等）
+tool/.tmp/
+tool/.tmp_smoke/
+# 生成产物：向量检索库、出图输出以及生图工作流
+tag_vectors.db
+images/
+workflows/

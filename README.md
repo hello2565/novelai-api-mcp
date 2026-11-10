@@ -1,138 +1,181 @@
-# nai-mcp — NovelAI 生图API MCP Server
+# nai-mcp — NovelAI Image Generation MCP Server
 
-独立的 stdio MCP Server，可接入 Claude Code / Codex / Cline 等任何支持 MCP 的 agent。请求格式对齐官方 OpenAPI 文档（`image.novelai.net/docs`）。生图始终走"**命名工作流**"：set 类工具只填参数不花钱，确认后再出图。
+**English** | [简体中文](README.zh-CN.md)
 
-## 快速开始
+A standalone stdio MCP Server that plugs into any MCP-capable agent — Claude Code, Codex, Cline, and friends. Request formats follow the official OpenAPI docs (`image.novelai.net/docs`). Image generation always goes through a **named workflow**: `set_*` tools only fill in parameters at zero cost; generation happens only after explicit confirmation.
+
+## Design philosophy: why named workflows
+
+Pointing an agent straight at an image-generation API brings three built-in risks: **accidentally triggering a billed generation**, **burning money on parameter trial-and-error**, and **getting dragged off-task by the images it looks at**. Every design decision in this tool addresses one of these:
+
+### 1. Generation = two phases: free parameter writes → the sole billing gate
+
+Generating is deliberately split in two. The `set_prompt` / `set_gen_param` / `set_characters` / `set_image` / `set_mask` / `set_precise_reference` family are **write-only tools: they touch no API and consume no Anlas**, and they are all **partial updates** (calls compose in any order; rewriting the same field is idempotent). Only three executor tools — `generate_image` / `enhance_image` / `upscale_image` — ever spend money. They are the single gate: probing parameters costs nothing, no matter how many tries.
+
+### 2. Workflows are named JSON files, not server memory
+
+Each workflow is a readable file `workflows/<name>.json`: diffable, hand-editable, and **survives across sessions**. After an agent restarts and forgets, `read_workflow` reconstructs the complete previous state; parallel creative lines live in separate named workflows (e.g. `protagonist` / `sketch_runs`).
+
+### 3. Estimate first, generate only after confirmation
+
+`read_workflow` / `estimate_anlas` are always free: they return the fully resolved parameters plus an Anlas estimate (with Opus free-tier judgment, live V5 quota pool usage, and the precise-reference surcharge). The agreed order of operations is **set → estimate → (user confirms) → generate**, and the server's `instructions` field encodes that protocol directly into agent tool guidance.
+
+### 4. Default everything to 0 Anlas
+
+Hard rules baked into the server instructions: default model `nai-diffusion-5-full`; the default parameter combination aligns with the Opus free tier (first image free at steps ≤ 28 and ≤ 1024×1024); `n_samples` defaults to 1; and no cost-producing parameter or tool is chosen **without the user's explicit request**. Every estimate also says "subject to server-side billing".
+
+### 5. The agent never needs image-editing skills
+
+The biggest friction of inpainting is that agents can't paint masks. `set_mask` accepts `rects` — a list of 0–1-normalized rectangles — and the server renders the mask itself, then runs the full official frontend pipeline: **8px-latent-grid quantization → hard-edged mask in the request → feathered soft mask → compositing the result back onto the source image**. The agent only needs to say "repaint the top-left region spanning 40% of the width", with zero image-editing capability.
+
+### 6. Normalize prompts before generating
+
+The workflow protocol says: pass every prompt through `search_tag` first — Chinese / aliases / semantic queries → proper Danbooru-style tags (`looking at viewer`, not prose). Output quality is decided by the tag vocabulary, not by the agent's vocabulary.
+
+### 7. Everything follows official docs and the reference client — nothing invented
+
+The Anlas formula, sampling presets, UC preset texts, inpainting model mapping, the precise-reference black-canvas spec (original sizes cause HTTP 500), and the V5 quota-pool semantics all mirror the official OpenAPI and the public behavior of the reference client [Aaalice_NAI_Launcher](https://github.com/Aaalice233/Aaalice_NAI_Launcher), with source attributions in code comments. When the upstream caliber changes, exactly one module changes too — the server stays self-consistent.
+
+## Quick start
 
 ```powershell
 cd nai_mcp
 python -m venv .venv
 .venv/Scripts/pip install -r requirements.txt
-# 可选：构建 tag 词库（自动从 GitHub 下载 Launcher 发布的 tag_catalog.db）
+# Optional: build the tag database (auto-downloads the Launcher's published tag_catalog.db)
 .venv/Scripts/python tool/build_tag_vector_db.py --db tag_vectors.db --with-ffdkj
 ```
 
-在客户端注册 stdio server，token 走环境变量：
+Register a stdio server in your MCP client, token via env:
 
 ```json
 {
   "mcpServers": {
     "nai-mcp": {
-      "command": "C:/Users/你的用户名/codes/nai_mcp/.venv/Scripts/python.exe",
-      "args": ["C:/Users/你的用户名/codes/nai_mcp/server.py"],
-      "env": { "NAI_TOKEN": "pst-你的持久令牌" }
+      "command": "C:/Users/your-name/codes/nai_mcp/.venv/Scripts/python.exe",
+      "args": ["C:/Users/your-name/codes/nai_mcp/server.py"],
+      "env": { "NAI_TOKEN": "pst-your-persistent-token" }
     }
   }
 }
 ```
 
-`NAI_TOKEN`：NovelAI 持久令牌（`pst-` 开头，账户设置 → API 令牌创建），或短期用户访问令牌。
+`NAI_TOKEN`: a NovelAI persistent token (starts with `pst-`; account settings → API tokens → create), or a short-lived user access token.
 
-> Agent 全局约定（已写入 server `instructions`）：默认模型为 **nai-diffusion-5-full**；出图默认以 **0 Anlas**（Opus 免费档：steps ≤ 28、≤ 1024×1024）为目标；写提示词前先用 `search_tag` 规范化，角色/主体优先用 `category=character` 的角色 tag。
+> Global agent conventions (written into the server `instructions`): default model is **nai-diffusion-5-full**; aim for **0 Anlas** by default (Opus free tier: steps ≤ 28, ≤ 1024×1024); normalize prompts via `search_tag` before writing; prefer `category=character` tags for characters/subjects.
 
-## 工具一览
+## Tool overview
 
-| 工具 | 作用 | Anlas |
+| Tool | Purpose | Anlas |
 | --- | --- | --- |
-| `list_workflows()` | 列出全部工作流名 | 否 |
-| `create_workflow(name, model?)` | 创建空工作流；`model` 预填模型并写入其采样预设，重复创建报错 | 否 |
-| `delete_workflow(name)` | 删除单个工作流（永久删除）。**仅当用户明确指明删除该工作流时才调用** | 否 |
-| `delete_all_workflows()` | 删除全部工作流（永久删除）。**仅当用户明确要求清空工作流时才调用** | 否 |
-| `clear_saved_images()` | 清空已保存图片目录下全部 PNG（默认 `nai_mcp/images/`，env `NAI_OUTPUT_DIR` 可改）。**仅当用户明确要求清空图片时才调用** | 否 |
-| `set_prompt(name, prompt, uc?)` | 写正面提示词（`uc` 可选负面词） | 否 |
-| `set_gen_param(name, ...)` | 写生成参数（模型/尺寸/步数/引导/采样器/种子/数量/uc 预设/cfg_rescale/噪声调度/use_coords），部分更新 | 否 |
-| `set_characters(name, characters)` | V4+ 多角色提示词，每角色可带 `uc` 与位置 `center:[x,y]`（0-1，省略用官方默认布局）；`[]` 清空 | 否 |
-| `set_image(name, image_path, strength?, noise?)` | img2img 底图（本地 PNG），`"clear"` 恢复文生图 | 否 |
-| `set_mask(name, mask_path?, rects?, strength?, noise?)` | inpaint 蒙版：矩形 `[[x,y,w,h]]`（0-1 归一）或蒙版 PNG（白=重绘）；`"clear"` 清除 | 否 |
-| `set_precise_reference(name, image_path, type?, strength?, fidelity?)` | 精准参考 / Character Reference：参考 PNG 锁定角色形象或画风；多次调用追加多张，`image_path="clear"` 清空；仅 V4.5 Curated / V4.5 Full 支持 | 否 |
-| `read_workflow(name)` | 读取工作流 + Anlas 预估，供确认 | 否 |
-| `estimate_anlas(name)` | 只估 Anlas 不生成；V5 工作流附带 Opus 免费配额实时用量 | 否 |
-| `list_gen_options()` | 全部合法取值与各模型默认/约束 | 否 |
-| `generate_image(name)` | 按工作流出图：有底图→img2img，有角色→V4 多角色结构 | **是** |
-| `enhance_image(name, level?, factor?)` | 增强重绘并放大（level 1-5 默认 3；factor 2.0/1.5/1.0 超上限自动回落） | 是 |
-| `upscale_image(image_path)` | 云端超分 `/ai/upscale`（v2 接口，服务端不认时自动回退旧版） | ≤4（Opus ≤640×640 免费） |
-| `search_tag(query, limit?, use_vector?)` | 标准 booru tag 检索（中文/别名/词面；`use_vector=True` 走语义） | 否 |
+| `list_workflows()` | List all workflow names | No |
+| `create_workflow(name, model?)` | Create an empty workflow; `model` preselects the model and writes its sampling presets; duplicate names error out | No |
+| `delete_workflow(name)` | Delete one workflow (permanent). **Only call when the user explicitly names it** | No |
+| `delete_all_workflows()` | Delete every workflow (permanent). **Only call when the user explicitly asks to clear all** | No |
+| `clear_saved_images()` | Clear all PNGs in the output directory (default `nai_mcp/images/`, env `NAI_OUTPUT_DIR`). **Only call when the user explicitly asks** | No |
+| `set_prompt(name, prompt, uc?)` | Write the positive prompt (`uc` = optional negative prompt) | No |
+| `set_gen_param(name, ...)` | Write generation parameters (model/size/steps/guidance/sampler/seed/samples/UC preset/cfg_rescale/noise schedule/use_coords), partial update | No |
+| `set_characters(name, characters)` | V4+ multi-character prompts; per-character `uc` and optional `center:[x,y]` (0–1; official default layout when omitted); `[]` clears | No |
+| `set_image(name, image_path, strength?, noise?)` | img2img source image (local PNG); `"clear"` returns to txt2img | No |
+| `set_mask(name, mask_path?, rects?, strength?, noise?)` | inpaint mask: rectangles `[[x,y,w,h]]` (0–1 normalized) or mask PNG (white = repaint); `"clear"` removes | No |
+| `set_precise_reference(name, image_path, type?, strength?, fidelity?)` | Precise reference / Character Reference: a reference PNG locking a character's look or a style; multiple calls append; `image_path="clear"` empties; V4.5 Curated / V4.5 Full only | No |
+| `read_workflow(name)` | Read a workflow + Anlas estimate, for confirmation | No |
+| `estimate_anlas(name)` | Estimate-only, no generation; V5 workflows additionally show live Opus quota usage | No |
+| `list_gen_options()` | All legal values plus per-model defaults/constraints | No |
+| `generate_image(name)` | Generate per the workflow: source image → img2img; characters set → V4 multi-character structure | **Yes** |
+| `enhance_image(name, level?, factor?)` | Enhance (full repaint + upscale); level 1–5, default 3; factor 2.0/1.5/1.0 auto-falls-back under the pixel cap | Yes |
+| `upscale_image(image_path)` | Cloud upscaling via `/ai/upscale` (v2 endpoint, falls back to the legacy version when the server rejects it) | ≤4 (free ≤640×640 on Opus) |
+| `search_tag(query, limit?, use_vector?)` | Danbooru tag search (Chinese/aliases/literal; `use_vector=True` for semantic) | No |
 
-工作流存储为 `nai_mcp/workflows/<name>.json`（env `NAI_MCP_WORKFLOW_DIR` 可改目录）。set 类工具只做部分更新，可任意顺序组合再生成。
+Workflows are stored as `nai_mcp/workflows/<name>.json` (directory overridable via env `NAI_MCP_WORKFLOW_DIR`). `set_*` tools only do partial updates; compose them in any order, then generate.
 
-## 模型与采样预设
+Dangerous tools (workflow deletion, image clearing) hard-code "**only call when the user explicitly asks**" in their descriptions, leaving irreversible actions to the user.
 
-支持模型（默认加粗）：**nai-diffusion-5-full**、nai-diffusion-5-curated、nai-diffusion-5-full-medium、nai-diffusion-4-5-full、nai-diffusion-4-5-curated、nai-diffusion-4-full、nai-diffusion-3
+## Models & sampling presets
 
-- 预设（来自 Launcher `ModelCapabilities`）：步数 28（V5 Medium 固定 14）；引导系数 V5 4.0 / V4.5 5.0 / V4 5.5 / V3 5.0；采样器 `k_euler_ancestral`；噪声调度 karras；UC 预设 heavy；img2img strength 0.7 / noise 0.0
-- V5 特有：UC `light` 为 V5 专属文案；`nai-diffusion-5-full-medium` 不发送 `cfg_rescale`；Anlas 模型倍率 1.5，且 Opus 免费额度改为**官方配额池**（见下文计费节；估价文本自动提示）
-- 官方质量词与 UC 预设文本自动补全；DDIM 仅 V3（V4+ 按官网规则回退 Euler Ancestral）
-- 精准参考（请求以 `director_reference*` 字段发送）：仅 V4.5 Curated / V4.5 Full 支持（同 Launcher `supportsPreciseReference`）；类型 `character` / `style` / `character&style`（默认）；`strength` 默认 1.0 透传强度，`fidelity` 默认 1.0 以 `1.0 - fidelity` 作为 secondary 强度；固定 `normalize_reference_strength_multiple=true`。参考图在请求时自动按官网口径规范化：按最接近宽高比选 `1024×1536` / `1536×1024` / `1472×1472` 目标、等比缩放（bilinear）后居中贴黑底画布——发送原始尺寸会被服务端 HTTP 500（对齐 Launcher `ensurePngFormat`，插值算法有差异）
-- UC 约定：预设（heavy/light/humanFocus/none）已自带整套官方质量负面词（lowres、worst quality 等）。自定义 `uc` 只需写想规避的**特定**缺陷/构图目标词，别重复质量词以免权重被放大
+Supported models (default in bold): **nai-diffusion-5-full**, nai-diffusion-5-curated, nai-diffusion-5-full-medium, nai-diffusion-4-5-full, nai-diffusion-4-5-curated, nai-diffusion-4-full, nai-diffusion-3
 
-### Inpaint（局部重绘）
+- Presets (from Launcher `ModelCapabilities`): 28 steps (V5 Medium fixed at 14); guidance V5 4.0 / V4.5 5.0 / V4 5.5 / V3 5.0; sampler `k_euler_ancestral`; noise schedule karras; UC preset heavy; img2img strength 0.7 / noise 0.0
+- V5 specifics: UC `light` uses V5-exclusive copy; `nai-diffusion-5-full-medium` does not send `cfg_rescale`; Anlas model multiplier 1.5, and the Opus free tier becomes an **official quota pool** (see the Billing section; estimate text notes it automatically)
+- Official quality tags and UC preset text are completed automatically; DDIM is V3-only (V4+ falls back to Euler Ancestral per the official rules)
+- Precise reference (sent as `director_reference*` fields): V4.5 Curated / V4.5 Full only (matching Launcher `supportsPreciseReference`); types `character` / `style` / `character&style` (default); `strength` defaults to 1.0 (passed through as strength), `fidelity` defaults to 1.0 (sent as `1.0 - fidelity` secondary strength); `normalize_reference_strength_multiple=true` always. Reference images are auto-normalized per the official spec at request time: pick the closest-aspect target among `1024×1536` / `1536×1024` / `1472×1472`, scale to fit (bilinear), and center on a black canvas — raw-size images get HTTP 500 (matching Launcher `ensurePngFormat`; interpolation differs)
+- UC convention: presets (heavy/light/humanFocus/none) already carry the full official quality negative list (lowres, worst quality, …). A custom `uc` should list only the **specific** defects/composition issues to avoid — repeating quality words would amplify their relative weight
 
-工作流同时有底图 + 蒙版时，`generate_image` 自动按官网 infill 规则出图：
+### Inpaint (partial repaint)
 
-- 模型自动切到 inpainting 变体（如 `nai-diffusion-4-5-full` → `…-inpainting`；V5 Curated 官方映射到 V4.5 Curated Inpainting），请求带 `mask` 分块，`extra_noise_seed = seed - 1`
-- 蒙版二选一：`rects`（server 自行渲染归一化矩形，agent 无需图像编辑能力）或 `mask_path`（PNG 白=重绘，自动二值化 + 缩放）
-- 蒙版 `strength` 默认 1.0（Launcher `inpaintStrength`）；<1 时按官网规则附带 `img2img` 复用原图潜空间。底图 `strength`（默认 0.7）控制整体变化强度，两者独立
-- Enhance 与蒙版互斥（增强是全图重绘），设置蒙版时调用会明确报错
+When a workflow has both a source image and a mask, `generate_image` follows the official infill rules automatically:
 
-## 计费与 Anlas 估价
+- The model switches to the inpainting variant (e.g. `nai-diffusion-4-5-full` → `…-inpainting`; V5 Curated maps officially to V4.5 Curated Inpainting); the request carries the `mask` field and `extra_noise_seed = seed - 1`
+- Two mask sources: `rects` (the server renders the normalized rectangles — the agent needs no image-editing skills) or `mask_path` (a PNG where white = repaint; auto-binarized and resized)
+- Mask `strength` defaults to 1.0 (Launcher `inpaintStrength`); below 1.0 the request attaches an `img2img` block reusing the original latent per official rules. Source-image `strength` (default 0.7) controls overall change; the two are independent
+- Enhance and masks are mutually exclusive (enhance repaints the whole image); calling with a mask set errors out explicitly
+- The mask pipeline mirrors the official frontend: binarize → latent 8px quantization (the request mask has hard edges) → feathered soft mask, only used for compositing results back afterwards
 
-移植 Launcher `AnlasCalculator`（现代模型公式）。估价工具自动查询订阅档位（`GET /user/subscription`），文本均标注"服务端计费为准"：
+## Billing & Anlas estimation
 
-- 文生图：Opus 且 steps ≤ 28、≤ 1024×1024 时首张免费
-- 云端超分：Opus 输入 ≤ 640×640 免费，否则按输入面积 1-4 Anlas 分档
-- 订阅查询失败按非 Opus 估算并注明
+Ported from the Launcher `AnlasCalculator` (modern-model formula). Estimation tools query the subscription tier automatically (`GET /user/subscription`); every estimate notes "subject to server-side billing":
 
-### V5 配额用量查看（read_workflow / estimate_anlas）
+- Generation: first image free on Opus at steps ≤ 28 and ≤ 1024×1024
+- Cloud upscaling: free ≤640×640 input on Opus, otherwise 1–4 Anlas by input-area tiers
+- When the subscription query fails, estimating assumes non-Opus and says so
+- Precise references: +5 Anlas per reference per sample (not covered by the Opus free tier)
 
-V5 的 Opus 免费额度是**配额池**而非无条件免费：随时间自动回充、额度与图面积挂钩（官网口径 1% ≈ 17.3 张 ≤1MP 免费图；大图按 2/3/4 份/张折算），透支后 V5 按正常价扣 Anlas。估价文本附加实时用量行（对齐 Launcher `OpusUsageChip`）：
+### V5 quota usage (read_workflow / estimate_anlas)
 
-- 正常：`V5 配额：剩余 97.3%，约可免费生成 1683 张 1MP 图（…配额随时间自动回充…）`
-- 透支：`V5 配额：已透支（V5 生成将按正常价扣 Anlas；配额随时间自动回充，达标后恢复免费）`
-- 数据源：`/user/subscription` 的 `usage` 字段（`percent` / `isNegative` / `timeUntilNextPercent`）；回充超过 100% 保留真实值；非 Opus 或查询失败时不附加
+On V5 the Opus free tier is a **quota pool**, not unconditional freeness: it refills over time and is tied to image area (official caliber: 1% ≈ 17.3 free ≤1MP images; larger images count as 2/3/4 units each), and an overdrawn pool bills V5 generations at normal Anlas prices. Estimate text appends a live usage line (matching Launcher `OpusUsageChip`):
 
-## tag 词库与语义检索
+- Normal: `V5 quota: 97.3% left, ~1683 free 1MP images (…quota refills over time…)`
+- Overdrawn: `V5 quota: overdrawn (V5 generation bills Anlas at normal price; quota refills over time and restores freeness once back above zero)`
+- Source: the `usage` field of `/user/subscription` (`percent` / `isNegative` / `timeUntilNextPercent`); refills above 100% are shown as-is; not appended for non-Opus or on query failure
 
-词库由 `tool/build_tag_vector_db.py` 生成（优先级同 Launcher：手工修订中文 > ffdkj 全量中文）：
+## Tag database & semantic search
 
-- **tag_catalog.db**：tag 名单、别名（37,790 条）与手工修订中文。默认**自动获取**：读 Launcher 仓库 main 分支的 `assets/databases/manifest.json`，下载其官方 release 资产并按清单锁定 SHA-256/大小校验，缓存在 `tool/.tmp/tag_catalog.db`（该文件在仓库内是 LFS，单纯 raw 下载会拿到 pointer，故走 release）。`--source <路径>` 可跳过网络用本地文件
-- **ffdkj 中文翻译表**（`--with-ffdkj`，推荐）：全量 32 万条中文。按 Launcher `zh_dictionary_download.dart` 锁定的 URL 下载、按固定 SHA-256 校验，缓存为 `tool/.tmp/ffdkj_tag.sqlite`
+The vocabulary is built by `tool/build_tag_vector_db.py` (priority matches the Launcher: hand-edited Chinese > full ffdkj Chinese):
 
-server 通过 env `NAI_TAG_DB` 指词库（默认项目根 `tag_vectors.db`）。
+- **tag_catalog.db**: tag list, aliases (37,790 entries), and hand-edited Chinese. Auto-fetched **by default**: reads the Launcher repo's `assets/databases/manifest.json` on the main branch, downloads the official release asset, and verifies it against the manifest's SHA-256/size, cached at `tool/.tmp/tag_catalog.db` (that file is LFS inside the repo, so raw downloads only fetch a pointer — hence going through release). Pass `--source <path>` to use a local file offline
+- **ffdkj Chinese translation table** (`--with-ffdkj`, recommended): full 320k-entry Chinese set. Downloads the URL pinned in Launcher `zh_dictionary_download.dart`, verified against a fixed SHA-256, cached as `tool/.tmp/ffdkj_tag.sqlite`
+
+The server picks the database via env `NAI_TAG_DB` (default `tag_vectors.db` in the project root).
 
 ```powershell
-# 生成词库
+# Build the vocabulary
 .venv/Scripts/python tool/build_tag_vector_db.py --db tag_vectors.db --with-ffdkj
 
-# 填充 embeddings（启用语义检索；不带参数默认填全部未填充行，可分批）
-$env:NAI_EMBEDDING_URL = "https://你的-embeddings-端点"
+# Fill embeddings (enables semantic search; no args fills every unfilled row, batchable)
+$env:NAI_EMBEDDING_URL = "https://your-embeddings-endpoint"
 $env:NAI_EMBEDDING_MODEL = "text-embedding-xxx"
-$env:NAI_EMBEDDING_API_KEY = "..."   # 可选
+$env:NAI_EMBEDDING_API_KEY = "..."   # optional
 .venv/Scripts/python tool/fill_tag_vectors.py
 ```
 
-`fill_tag_vectors.py` 性能：请求打满模型 token 上限 + 并发。默认按 32k 输入模型：`NAI_EMBED_BATCH_TOKENS`=24000、`NAI_EMBED_CHARS_PER_TOKEN`=1.0、`NAI_EMBED_CONCURRENCY`=4；脚本参数 `--min-post-count` / `--max-rows` 可先填高频 tag；429/5xx 指数退避，响应带 `index` 时按 index 回填。参考量级：22 万行 ≈ 200 个请求、4 并发几十分钟。`tool/mock_embeddings_server.py` 可离线验证链路。
+`fill_tag_vectors.py` performance: requests packed to the model's token limit + concurrency. Defaults assume a 32k-input model: `NAI_EMBED_BATCH_TOKENS`=24000, `NAI_EMBED_CHARS_PER_TOKEN`=1.0, `NAI_EMBED_CONCURRENCY`=4; script flags `--min-post-count` / `--max-rows` let you fill hot tags first; 429/5xx exponential backoff; when responses carry `index`, results are written back by index. Order of magnitude: 220k rows ≈ 200 requests, tens of minutes at 4-way concurrency. `tool/mock_embeddings_server.py` validates the pipeline offline.
 
-词向量填充前，`search_tag` 为中文/别名/词面检索（约 0.1s）；配置 embeddings 后自动启用余弦语义（如"面向观众" → `looking at viewer`，向量 numpy float32 矩阵单次乘，查询耗时主要是 embeddings 网络延迟 1-4s）。未装 numpy 自动回退纯 Python。
+Before vectors are filled, `search_tag` does Chinese/alias/literal matching (~0.1s); once embeddings are configured, cosine semantic search switches on automatically (e.g. "facing the viewer" → `looking at viewer`; the vectors form a single numpy float32 matmul, so latency is dominated by the 1–4s embeddings network round-trip). Falls back to pure Python if numpy is missing.
 
-## 环境变量
+## Environment variables
 
-| 变量 | 用途 | 缺省 |
+| Variable | Purpose | Default |
 | --- | --- | --- |
-| `NAI_TOKEN` | NovelAI 令牌（必需） | — |
-| `NAI_MCP_WORKFLOW_DIR` | 工作流目录 | `nai_mcp/workflows/` |
-| `NAI_TAG_DB` | tag 词库路径 | 项目根 `tag_vectors.db` |
-| `NAI_EMBEDDING_URL` / `NAI_EMBEDDING_MODEL` / `NAI_EMBEDDING_API_KEY` | embeddings 端点（server 与填充脚本共用） | — |
-| `NAI_EMBED_BATCH_TOKENS` / `NAI_EMBED_CHARS_PER_TOKEN` / `NAI_EMBED_CONCURRENCY` | 填充性能调优 | 24000 / 1.0 / 4 |
+| `NAI_TOKEN` | NovelAI token (required) | — |
+| `NAI_MCP_WORKFLOW_DIR` | Workflow directory | `nai_mcp/workflows/` |
+| `NAI_OUTPUT_DIR` | Image output directory | `nai_mcp/images/` |
+| `NAI_TAG_DB` | Tag database path | project-root `tag_vectors.db` |
+| `NAI_EMBEDDING_URL` / `NAI_EMBEDDING_MODEL` / `NAI_EMBEDDING_API_KEY` | embeddings endpoint (shared by server and filler script) | — |
+| `NAI_EMBED_BATCH_TOKENS` / `NAI_EMBED_CHARS_PER_TOKEN` / `NAI_EMBED_CONCURRENCY` | filler performance tuning | 24000 / 1.0 / 4 |
 
-## 验证
+## Verification
 
-`.venv/Scripts/python smoke_test.py` — 全离线：stdio 握手、18 个工具、工作流创建/读写/删除、Anlas 估价与 V5 配额格式化、角色/底图/蒙版/精准参考设置、tag 检索、错误路径（不触网、不扣费）。
+`.venv/Scripts/python smoke_test.py` — fully offline: stdio handshake, all 18 tools, workflow create/read/delete flow, Anlas estimation & V5 quota formatting, character/source-image/mask/precise-reference setup, tag search, and error paths (no network, no billing).
 
-## 参考实现：Aaalice_NAI_Launcher
+## Reference implementation: Aaalice_NAI_Launcher
 
-本项目大量实现取自参考项目 [Aaalice233/Aaalice_NAI_Launcher](https://github.com/Aaalice233/Aaalice_NAI_Launcher)（Flutter 桌面客户端），按其内部实现的公开行为移植并复刻口径：
+Large parts of this project are ported from the reference project [Aaalice233/Aaalice_NAI_Launcher](https://github.com/Aaalice233/Aaalice_NAI_Launcher) (a Flutter desktop client), mirroring the public behavior of its internals:
 
-- Anlas 计费公式与 Opus 免费判断 —— `AnlasCalculator` 现代公式、云端超分分档
-- 模型采样预设、UC 质量词/预设文本、inpainting 变体映射 —— `ModelCapabilities` / `ImageModels`
-- V5 Opus 配额池口径与展示（1% ≈ 17.3 张、透支语义、回充） —— `OpusUsageInfo` / `/user/subscription` 解析 / `OpusUsageChip`
-- tag 词库与中文翻译来源、锁定哈希校验 —— `tool/tag_catalog/` 与 `zh_dictionary_download.dart`
+- Anlas billing formula & Opus free-tier judgment — `AnlasCalculator` modern formula, cloud upscaling tiers
+- Model sampling presets, UC quality tags/preset texts, inpainting variant mapping — `ModelCapabilities` / `ImageModels`
+- V5 Opus quota pool caliber & display (1% ≈ 17.3 images, overdraw semantics, refill) — `OpusUsageInfo` / `/user/subscription` parsing / `OpusUsageChip`
+- Tag vocabulary & Chinese translation sources, pinned-hash verification — `tool/tag_catalog/` and `zh_dictionary_download.dart`
+
+## License
+
+[MIT](LICENSE)

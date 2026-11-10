@@ -36,6 +36,7 @@ def write_png(width: int, height: int, rgb_rows: bytes) -> bytes:
 
 
 def _paeth(a: int, b: int, c: int) -> int:
+    """PNG filter 4 的标准 Paeth 预测器：取最近邻（左/上/左上）中预测误差最小者。"""
     p = a + b - c
     pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
     if pa <= pb and pa <= pc:
@@ -86,8 +87,6 @@ def decode_png_rgb(png_bytes: bytes) -> tuple[int, int, bytes]:
                 break
         if not palette or len(palette) % 3 != 0:
             raise ValueError("调色板 PNG 缺少 PLTE 数据")
-    if channels is None:
-        raise ValueError(f"暂不支持的蒙版 PNG 颜色类型 {color_type}")
 
     stride = width * channels
     raw = bytearray(zlib.decompress(bytes(idat)))
@@ -140,6 +139,7 @@ def decode_png_rgb(png_bytes: bytes) -> tuple[int, int, bytes]:
 
 
 def _resize_nearest(rgb_rows: bytes, src_w: int, src_h: int, width: int, height: int) -> bytes:
+    """最近邻缩放 RGB 像素（16.16 定点缩放比；蒙版/合成时尺寸对齐用）。"""
     out = bytearray(width * height * 3)
     x_ratio = ((src_w << 16) // width) or 1
     y_ratio = ((src_h << 16) // height) or 1
@@ -233,6 +233,7 @@ def _latent_quantize(binary: bytes, width: int, height: int, grid: int = 8) -> b
 
 
 def _binary_like_rgb(values: bytes) -> bytes:
+    """灰度字节流展开为黑/白 RGB 三通道（请求 mask PNG 按三通道编码）。"""
     return bytes(v for value in values for v in (value, value, value))
 
 

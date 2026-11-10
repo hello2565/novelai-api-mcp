@@ -10,6 +10,7 @@
 import base64
 import io
 import json
+import os
 import struct
 import urllib.error
 import urllib.request
@@ -117,25 +118,30 @@ class ModelProfile:
     supports_precise_reference: bool = False
 
 
+# V4.5 与 V5 共用的整套预设文案（官网两代模型 heavy/humanFocus 同文，
+# singleton 常量避免逐字重复三份易失同步）
+_UC_HEAVY = (
+    "lowres, artistic error, film grain, scan artifacts, worst quality, "
+    "bad quality, jpeg artifacts, very displeasing, chromatic aberration, "
+    "dithering, halftone, screentone, multiple views, logo, "
+    "too many watermarks, negative space, blank page"
+)
+_UC_HUMAN_FOCUS = (
+    "lowres, artistic error, film grain, scan artifacts, worst quality, "
+    "bad quality, jpeg artifacts, very displeasing, chromatic aberration, "
+    "dithering, halftone, screentone, multiple views, logo, "
+    "too many watermarks, negative space, blank page, @_@, "
+    "mismatched pupils, glowing eyes, bad anatomy"
+)
+
 _V4_UC = {
-    "heavy": (
-        "lowres, artistic error, film grain, scan artifacts, worst quality, "
-        "bad quality, jpeg artifacts, very displeasing, chromatic aberration, "
-        "dithering, halftone, screentone, multiple views, logo, "
-        "too many watermarks, negative space, blank page"
-    ),
+    "heavy": _UC_HEAVY,
     "light": (
         "lowres, artistic error, scan artifacts, worst quality, bad quality, "
         "jpeg artifacts, multiple views, very displeasing, "
         "too many watermarks, negative space, blank page"
     ),
-    "humanFocus": (
-        "lowres, artistic error, film grain, scan artifacts, worst quality, "
-        "bad quality, jpeg artifacts, very displeasing, chromatic aberration, "
-        "dithering, halftone, screentone, multiple views, logo, "
-        "too many watermarks, negative space, blank page, @_@, "
-        "mismatched pupils, glowing eyes, bad anatomy"
-    ),
+    "humanFocus": _UC_HUMAN_FOCUS,
     "none": "",
 }
 
@@ -149,23 +155,12 @@ _FURRY_UC = (
 
 # V5 预设（Curated/Full 共用；heavy/humanFocus 与 V4.5 Full 同文案，light 为 V5 新文案）
 _V5_UC = {
-    "heavy": (
-        "lowres, artistic error, film grain, scan artifacts, worst quality, "
-        "bad quality, jpeg artifacts, very displeasing, chromatic aberration, "
-        "dithering, halftone, screentone, multiple views, logo, "
-        "too many watermarks, negative space, blank page"
-    ),
+    "heavy": _UC_HEAVY,
     "light": (
         "lowres, bad hands, bad anatomy, artistic error, sepia, white haze, "
         "worst quality, very displeasing, jpeg artifacts, 0::ai-generated::"
     ),
-    "humanFocus": (
-        "lowres, artistic error, film grain, scan artifacts, worst quality, "
-        "bad quality, jpeg artifacts, very displeasing, chromatic aberration, "
-        "dithering, halftone, screentone, multiple views, logo, "
-        "too many watermarks, negative space, blank page, @_@, "
-        "mismatched pupils, glowing eyes, bad anatomy"
-    ),
+    "humanFocus": _UC_HUMAN_FOCUS,
     "furryFocus": _FURRY_UC,
     "none": "",
 }
@@ -295,6 +290,7 @@ MODELS: dict[str, ModelProfile] = {
 
 
 def is_v4_model(model: str) -> bool:
+    """V4 起的模型（V4/V5）走 v4_prompt / characterPrompts 多角色结构。"""
     return model.startswith(_V4_PREFIX)
 
 
@@ -304,6 +300,7 @@ def is_v4_model(model: str) -> bool:
 
 
 def sanitize_resolution(width: int, height: int) -> tuple[int, int]:
+    """尺寸对齐官方网格：64 的倍数、≥64；超 3.14 MP 等比缩回上限内。"""
     width = max(GRID, width // GRID * GRID)
     height = max(GRID, height // GRID * GRID)
     if width * height > MAX_PIXELS:
@@ -396,28 +393,24 @@ def build_request(
 ) -> dict:
     """构造 generate-image 请求体（含 V4 角色结构、img2img 与 infill 字段）。"""
     profile = MODELS[model]
-    # infill 时按官网规则切换 inpainting 变体（采样预设仍按基础模型取值）
+    # infill 时按官网规则切换 inpainting 变体（采样预设仍按基础模型取值：
+    # steps/scale 取 model_for_preset 对应 profile，请求体发变体模型名）
     model_for_preset = model
     if mask_b64 and model in INPAINTING_MODELS:
         model = INPAINTING_MODELS[model]
     is_v4 = is_v4_model(model_for_preset)
 
+    # 官方质量词（qualityPresetId=standard 口径）自动拼接在正面词尾部
     effective_prompt = f"{prompt}, {profile.quality}" if prompt else profile.quality
     if enhance_addition and supports_enhance_addition(model):
         effective_prompt = effective_prompt.rstrip() + ENHANCE_PROMPT_ADDITION
-    if is_v4:
-        base_negative = negative_prompt
-        preset_text = profile.uc_presets.get(uc_preset, "")
-        if preset_text and base_negative:
-            effective_negative = f"{preset_text}, {base_negative}"
-        else:
-            effective_negative = preset_text or base_negative
+    # 负面词组装：官方 UC 预设整套质量词在前、用户自定义 uc 在后（叠加关系）。
+    # V4/V3 两代对 uc 字段的处理一致，统一在此拼装，仅下方请求体结构不同。
+    preset_text = profile.uc_presets.get(uc_preset, "")
+    if preset_text and negative_prompt:
+        effective_negative = f"{preset_text}, {negative_prompt}"
     else:
-        profile_uc = profile.uc_presets.get(uc_preset, "")
-        if profile_uc and negative_prompt:
-            effective_negative = f"{profile_uc}, {negative_prompt}"
-        else:
-            effective_negative = profile_uc or negative_prompt
+        effective_negative = preset_text or negative_prompt
 
     if characters and not is_v4:
         raise ValueError(f"模型 {model} 不支持角色 Prompt")
@@ -609,8 +602,6 @@ def _normalize_token(value: str) -> str:
 
 
 def _token() -> str:
-    import os
-
     token = _normalize_token(os.environ.get("NAI_TOKEN", ""))
     if not token:
         raise RuntimeError(

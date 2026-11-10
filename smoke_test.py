@@ -23,6 +23,7 @@ ENV.pop("NAI_TOKEN", None)
 
 
 def make_png(width=8, height=8) -> bytes:
+    """手工打包一张红底 8-bit RGB PNG（不依赖图像库）。"""
     import zlib
 
     def chunk(tag, data):
@@ -44,6 +45,7 @@ def make_png(width=8, height=8) -> bytes:
 
 
 def make_tag_db() -> None:
+    """造一个 3 行的最小 tag 库（无向量），覆盖词面检索路径。"""
     DB = TMP / "tags.db"
     DB.unlink(missing_ok=True)
     con = sqlite3.connect(str(DB))
@@ -119,6 +121,7 @@ def main() -> None:
     assert set(names) == expected, names
 
     def call(cid, tool, args):
+        """发起一次 tools/call，返回首个 text content（或结构化内容）。"""
         result = send(
             {
                 "jsonrpc": "2.0",

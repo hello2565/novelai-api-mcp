@@ -83,6 +83,7 @@ def estimate_generation_cost(
 
 
 def estimate_upscale_cost(input_pixels: int, is_opus: bool | None = None) -> str:
+    """估算 /ai/upscale 单次费用：Opus 输入 ≤640×640 免费，否则按面积分档。"""
     if input_pixels > 3145728:
         return "输入面积超过官网最高计费分档，无法估计；服务端计费为准"
     if is_opus is True and input_pixels <= _UPSCALE_FREE_INPUT:
@@ -107,6 +108,7 @@ _V5_PREFIX = "nai-diffusion-5"
 
 
 def _quota_units_for_area(area: int) -> int:
+    """按图面积折算免费用量份数（启动 1 份 ≤1MP，封顶 4 份/张）。"""
     return next(c for max_p, c in _UPSCALE_TIERS if area <= max_p)
 
 

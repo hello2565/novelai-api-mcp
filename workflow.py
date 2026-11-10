@@ -31,22 +31,6 @@ WORKFLOW_DIR = Path(
 )
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
-GEN_KEYS = (
-    "model",
-    "width",
-    "height",
-    "steps",
-    "scale",
-    "sampler",
-    "seed",
-    "n_samples",
-    "uc_preset",
-    "cfg_rescale",
-    "noise_schedule",
-    "use_coords",
-    "precise_refs",
-)
-
 
 def sanitize_name(name: str) -> str:
     if not isinstance(name, str) or not NAME_PATTERN.match(name):

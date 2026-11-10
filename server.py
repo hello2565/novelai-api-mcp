@@ -12,10 +12,14 @@ generate_image / enhance_image / upscale_image 按名称或图片实际出图。
 import base64
 import json
 import os
+import secrets
 import time
+from pathlib import Path
+
 from mcp.server.fastmcp import FastMCP, Image
 
 import anlas
+import nai_mask
 import nai_request
 import tagsearch
 import workflow
@@ -34,10 +38,8 @@ mcp = FastMCP(
 )
 
 
-def _output_dir(save_dir: str | None):
+def _output_dir(save_dir: str | None) -> Path:
     """图片保存目录：save_dir 参数优先，其次 env NAI_OUTPUT_DIR，默认项目 images/。"""
-    from pathlib import Path
-
     out_dir = (
         Path(save_dir).expanduser()
         if save_dir
@@ -50,8 +52,7 @@ def _output_dir(save_dir: str | None):
 
 
 def _save_images(images: list[bytes], save_dir: str | None) -> list:
-    from pathlib import Path
-
+    """按时间戳命名保存 PNG（nai_YYYYMMDD_HHMMSS_<序号>.png），返回路径列表。"""
     out_dir = _output_dir(save_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -64,7 +65,13 @@ def _save_images(images: list[bytes], save_dir: str | None) -> list:
 
 
 def _summarize(wf: dict) -> str:
+    """工作流转 JSON 文本（回传给 agent 展示/确认用）。"""
     return json.dumps(wf, ensure_ascii=False, indent=2)
+
+
+def _resolve_seed(gen_seed: int) -> int:
+    """seed=-1 表示随机种子：取一个 uint32 内随机值（与官网行为一致）。"""
+    return secrets.randbelow(4294967295) if gen_seed == -1 else gen_seed
 
 
 def estimate_image_payload(resolved: dict, strength: float | None = None) -> float:
@@ -252,8 +259,6 @@ def set_image(name: str, image_path: str, strength: float | None = None, noise: 
     if path in ("", "clear"):
         wf = workflow.write_patch(name, {"image": None})
         return f"工作流 {name} 已清除底图，回到文生图。"
-    import os
-
     expanded = os.path.expanduser(path)
     if not os.path.isfile(expanded):
         raise ValueError(f"底图不存在：{path}")
@@ -286,8 +291,6 @@ def set_mask(
     noise: float | None = None,
 ) -> str:
     """写入蒙版（mask_path 或 rects 二选一）；"clear" 清除。"""
-    import os
-
     path = (mask_path or "").strip()
     normalized_rects = [list(r) for r in rects] if rects else []
     if path == "clear":
@@ -300,9 +303,7 @@ def set_mask(
     if path:
         payload = {"path": os.path.expanduser(path), "rects": []}
     else:
-        import nai_mask
-
-        # 预渲染校验坐标合法性与蒙版非空
+        # rects 路径：预渲染一次，即校验坐标合法性与蒙版非空
         raw = workflow.load(name) if workflow.workflow_path(name).exists() else {}
         gen = raw.get("gen") or {}
         width, height = nai_request.sanitize_resolution(
@@ -356,8 +357,6 @@ def set_precise_reference(
         raise ValueError(
             f"type 无效 {type}，可选：{', '.join(nai_request.PRECISE_REF_TYPES)}"
         )
-    import os
-
     expanded = os.path.expanduser(path)
     with open(expanded, "rb") as fh:
         is_png = fh.read(8) == b"\x89PNG\r\n\x1a\n"
@@ -551,20 +550,14 @@ def _dispatch_generation(
             raise ValueError(
                 f"工作流 {name} 设置了蒙版但没有底图：先 set_image 再生图"
             )
-        import nai_mask
-
-        # 官网式羽化蒙版：请求用软蒙版，生成后还要按它合成回原图
+        # 官网式羽化蒙版：请求用 8px 量化硬蒙版，生成后按软蒙版合成回原图
         mask_bytes, soft_mask = nai_mask.prepare_mask(
             mask_info.get("path") or None,
             mask_info.get("rects") or None,
             resolved["width"],
             resolved["height"],
         )
-    seed = resolved["seed"]
-    if seed == -1:
-        import secrets
-
-        seed = secrets.randbelow(4294967295)
+    seed = _resolve_seed(resolved["seed"])
     size = (resolved["width"], resolved["height"])
     request = nai_request.build_request(
         prompt=resolved["prompt"],
@@ -594,11 +587,13 @@ def _dispatch_generation(
         inpaint_strength=mask_info["strength"] if mask_info else None,
         precise_refs=resolved.get("precise_refs") or None,
     )
+    # params 是回传给 agent 的实际出图参数摘要（model 显示真实发送的变体名）
     action = (
         "infill" if mask_bytes
         else "img2img" if image_bytes
         else "generate"
     )
+    # 报告的 strength 语义：infill 报蒙版强度，img2img 报底图强度
     params_strength = (
         mask_info["strength"] if mask_info else
         img_info["strength"] if img_info else None
@@ -607,8 +602,6 @@ def _dispatch_generation(
     images = nai_request.pngs_from_response(response)
     if soft_mask:
         # 官网后处理：生成结果按软蒙版合成回原图，蒙版外像素保持原图
-        import nai_mask
-
         images = [
             nai_mask.composite(image_bytes, png, soft_mask, size[0], size[1])
             for png in images
@@ -692,18 +685,17 @@ def enhance_image(name: str, level: int = 3, factor: float = 2.0) -> list:
         raise ValueError(
             f"工作流 {name} 还没有底图：先调用 set_image(name, image_path)"
         )
-    if not (1 <= int(level) <= 5):
-        raise ValueError("level 取值 1-5")
-    # EnhanceLevels：1-5 档固定 strength/noise（最高档 0.7/0.1）
+    # EnhanceLevels 官方档位：1-5 档固定 strength/noise（最高档 0.7/0.1）
     strengths = (0.2, 0.4, 0.5, 0.6, 0.7)
     noises = (0.0, 0.0, 0.0, 0.0, 0.1)
     level = int(level)
-    if resolved["image"]:
-        resolved["image"] = {
-            **resolved["image"],
-            "strength": strengths[level - 1],
-            "noise": noises[level - 1],
-        }
+    if not (1 <= level <= 5):
+        raise ValueError("level 取值 1-5")
+    resolved["image"] = {
+        **resolved["image"],
+        "strength": strengths[level - 1],
+        "noise": noises[level - 1],
+    }
     source_bytes = open(resolved["image"]["path"], "rb").read()
     source_w, source_h = nai_request.read_png_size(source_bytes)
     width, height = nai_request.sanitize_resolution(
@@ -729,12 +721,8 @@ def enhance_image(name: str, level: int = 3, factor: float = 2.0) -> list:
 
 
 def _enhance_dispatch(resolved: dict) -> tuple[list[bytes], dict]:
-    """增强请求与 img2img 相同，n_samples 固定 1。"""
-    from secrets import randbelow
-
-    seed = resolved["seed"]
-    if seed == -1:
-        seed = randbelow(4294967295)
+    """增强请求与 img2img 相同，n_samples 固定 1；返回（图片字节, 参数摘要）。"""
+    seed = _resolve_seed(resolved["seed"])
     image_bytes = open(resolved["image"]["path"], "rb").read()
     request = nai_request.build_request(
         prompt=resolved["prompt"],
@@ -778,8 +766,6 @@ def _enhance_dispatch(resolved: dict) -> tuple[list[bytes], dict]:
 )
 def upscale_image(image_path: str) -> list:
     """cloud upscale 单张图片。"""
-    import os
-
     expanded = os.path.expanduser(image_path)
     if not os.path.isfile(expanded):
         raise ValueError(f"图片不存在：{image_path}")

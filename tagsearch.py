@@ -111,6 +111,7 @@ _QUERY_VEC_CACHE: dict[str, object] = {}  # (model, text) → 查询向量（LRU
 
 
 def _query_vector(text: str):
+    """查询词 → embeddings 向量（带 (model, text) ≤256 条的 LRU 缓存）。"""
     url = os.environ.get("NAI_EMBEDDING_URL", "").strip()
     if not url:
         return None
@@ -158,6 +159,7 @@ def _cosine_fallback(query_vec, tags: list[dict], scored: dict, add) -> None:
 
 
 def _cosine(a, b) -> float:
+    """纯 Python 余弦相似度（无 numpy 兜底路径用）。"""
     return float(
         sum(x * y for x, y in zip(a, b))
         / max(sum(x * x for x in a) ** 0.5 * sum(y * y for y in b) ** 0.5, 1e-30)
@@ -165,6 +167,7 @@ def _cosine(a, b) -> float:
 
 
 def _has_vectors(tags: list[dict]) -> bool:
+    """词库里是否已存在任何填充过的向量（numpy 矩阵或逐行 blob）。"""
     return _CACHE["matrix"] is not None or any(t.get("vector") for t in tags)
 
 
